@@ -1,0 +1,19 @@
+{
+  "windowStart": "2026-05-26T10:50:00.000Z",
+  "windowDays": 1,
+  "limits": {
+    "input": 1000000,
+    "output": 100,
+    "total": 1000100
+  },
+  "thresholds": {
+    "warn": 0.8
+  },
+  "usage": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "calls": 0
+  },
+  "lastDecision": "ok"
+}
