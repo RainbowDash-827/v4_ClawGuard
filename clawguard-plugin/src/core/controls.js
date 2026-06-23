@@ -2,7 +2,7 @@ import { ensureRuleBlock, readSoul, writeJson } from './state.js';
 
 const RISKY_SANDBOX_MODES = new Set(['danger-full-access', 'disabled', 'off']);
 const OPEN_APPROVAL_MODES = new Set(['never', 'auto']);
-const TRUSTED_GATEWAY_BINDS = new Set(['127.0.0.1', 'localhost']);
+const TRUSTED_GATEWAY_BINDS = new Set(['127.0.0.1', 'localhost', 'loopback']);
 
 export function getControls() {
   return [
@@ -15,19 +15,19 @@ export function getControls() {
       title: 'Shrink gateway exposure surface',
       describe: (context) => {
         const bind = context.config?.gateway?.bind;
-        if (!bind || TRUSTED_GATEWAY_BINDS.has(bind)) return null;
+        if (TRUSTED_GATEWAY_BINDS.has(bind)) return null;
         return {
-          description: `gateway.bind is currently ${bind}, exposing the gateway to a wider reachable surface.`,
-          evidence: { currentBind: bind, expected: [...TRUSTED_GATEWAY_BINDS] },
-          remediation: 'Restrict gateway.bind to 127.0.0.1',
+          description: `gateway.bind is currently ${bind || '(unset)'}, exposing the gateway to a wider reachable surface.`,
+          evidence: { currentBind: bind || '(unset)', expected: [...TRUSTED_GATEWAY_BINDS] },
+          remediation: 'Set gateway.bind to 127.0.0.1, localhost, or loopback',
           autoFixable: true
         };
-      },
+      }, 
       remediate: async (context) => {
         if (!context.config.gateway) context.config.gateway = {};
-        context.config.gateway.bind = '127.0.0.1';
+        context.config.gateway.bind = 'loopback';
         await writeJson(context.configPath, context.config);
-        return 'gateway.bind -> 127.0.0.1';
+        return 'gateway.bind -> loopback';
       }
     },
     {
