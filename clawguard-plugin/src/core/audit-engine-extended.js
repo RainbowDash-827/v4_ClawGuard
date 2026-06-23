@@ -150,7 +150,7 @@ async function auditGatewayExtended(context) {
     title: 'Gateway port accessibility check (requires --deep)',
     description: `Port ${gatewayPort} remote accessibility requires deep scan mode (--deep) for active probing.`,
     evidence: `Port: ${gatewayPort}`,
-    remediation: 'Run audit with --deep flag for active network probing',
+    remediation: 'Run `npx openclaw security audit --deep` for active port probing',
     autoFixable: false,
     threat: 'reconnaissance',
     references: [],

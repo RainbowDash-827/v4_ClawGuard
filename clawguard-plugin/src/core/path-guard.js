@@ -1,20 +1,5 @@
 /**
- * Clawkeeper Path Guard (v1.1 feature: Dangerous File Protection List)
- *
- * Provides synchronous path normalization + glob matching so the
- * before_tool_call hook can hard-block any tool that tries to read,
- * write, delete, or exec against a protected path.
- *
- * Design notes:
- *  - Zero external deps: small inline glob -> regex converter.
- *  - Normalization handles ~, ./, .., and (best-effort) symlinks via
- *    fs.realpathSync. On ENOENT we fall back to path.resolve.
- *  - For bash-like tools we tokenize the command string and also
- *    regex-scan for ~/... and /... path literals.
- *  - For structured tools we recursively collect string params that
- *    look like paths.
- *  - Everything runs synchronously so the hook can return a decision
- *    without introducing async delays on the hot path.
+ * Clawkeeper Path Guard (Windows Optimized)
  */
 
 import fs from 'node:fs';
@@ -27,28 +12,43 @@ const DEFAULT_RULES_PATH = path.join(__dirname, '..', 'config', 'core-rules.json
 
 let cachedRules = null;
 const DEFAULT_FAILURE_POLICY = 'fail-closed';
+const IS_WINDOWS = os.platform() === 'win32';
+
+/**
+ * 辅助函数：统一路径格式
+ * 1. 将所有反斜杠 \ 转为正斜杠 /
+ * 2. 在 Windows 下转为全小写，防止大小写绕过
+ */
+function unifyPath(p) {
+  if (!p) return '';
+  let normalized = p.replace(/\\/g, '/');
+  return IS_WINDOWS ? normalized.toLowerCase() : normalized;
+}
 
 /**
  * Load (and cache) protected paths + config from core-rules.json.
- * @param {string} [rulesPath]
  */
 export function loadProtectedPaths(rulesPath = DEFAULT_RULES_PATH) {
   if (cachedRules && cachedRules._source === rulesPath) return cachedRules;
   const raw = JSON.parse(fs.readFileSync(rulesPath, 'utf-8'));
-  const rules = (raw.protectedPaths || []).map((r) => ({
-    ...r,
-    regex: globToRegex(expandHome(r.pattern)),
-    expanded: expandHome(r.pattern),
-  }));
+  
+  const rules = (raw.protectedPaths || []).map((r) => {
+    const expanded = expandHome(r.pattern);
+    return {
+      ...r,
+      regex: globToRegex(expanded),
+      expanded: expanded,
+      unified: unifyPath(expanded), // 存储统一化后的路径
+    };
+  });
+  
   const config = raw.pathGuard || { enabled: true, failurePolicy: 'fail-closed', bashLikeTools: [] };
   cachedRules = { rules, config, _source: rulesPath };
   return cachedRules;
 }
 
-/** Force cache invalidation (primarily for tests). */
 export function resetPathGuardCache() { cachedRules = null; }
 
-/** Expand a leading ~ to the current user's home directory. */
 export function expandHome(p) {
   if (!p) return p;
   if (p === '~') return os.homedir();
@@ -57,21 +57,18 @@ export function expandHome(p) {
 }
 
 /**
- * Convert a simple glob pattern to an anchored regex.
- * Supports: **  *  ?  and literal characters.
- *  **   -> .*        (any chars, including /)
- *  *    -> [^/]*     (any chars except /)
- *  ?    -> [^/]      (single char except /)
+ * 转换 Glob 为 Regex，支持 Windows/Unix 双斜杠
  */
 export function globToRegex(glob) {
+  let p = glob.replace(/\\/g, '/'); // 内部统一处理
   let re = '^';
-  for (let i = 0; i < glob.length; i++) {
-    const c = glob[i];
+  for (let i = 0; i < p.length; i++) {
+    const c = p[i];
     if (c === '*') {
-      if (glob[i + 1] === '*') { re += '.*'; i++; }
-      else { re += '[^/]*'; }
+      if (p[i + 1] === '*') { re += '.*'; i++; }
+      else { re += '[^/\\\\]*'; } // 同时匹配正反斜杠
     } else if (c === '?') {
-      re += '[^/]';
+      re += '[^/\\\\]';
     } else if ('.+^${}()|[]\\'.includes(c)) {
       re += '\\' + c;
     } else {
@@ -79,43 +76,52 @@ export function globToRegex(glob) {
     }
   }
   re += '$';
-  return new RegExp(re);
+  // Windows 下必须不区分大小写
+  return new RegExp(re, IS_WINDOWS ? 'i' : '');
 }
 
 /**
- * Normalize an incoming path candidate to an absolute path.
- * Best-effort: resolves ~, relative segments, and symlinks if the
- * target exists. On any filesystem error falls back to path.resolve.
+ * 规范化路径：处理相对路径、符号链接并统一斜杠
  */
 export function normalizePath(input, cwd = process.cwd()) {
   if (typeof input !== 'string' || !input) return null;
   let p = expandHome(input.trim());
-  // Strip surrounding quotes
   if ((p.startsWith('"') && p.endsWith('"')) || (p.startsWith("'") && p.endsWith("'"))) {
     p = p.slice(1, -1);
   }
   if (!path.isAbsolute(p)) p = path.resolve(cwd, p);
+  
   try {
+    // 尽量获取真实路径（处理快捷方式或软链接）
     return fs.realpathSync(p);
   } catch {
+    // 如果文件不存在，至少返回绝对路径
     return path.resolve(p);
   }
 }
 
 /**
- * Test a single absolute path against the rule list.
- * Returns the first matching rule or null.
+ * 核心匹配逻辑：使用统一化路径进行比对
  */
 export function matchProtected(absPath, rules) {
   if (!absPath) return null;
+  
+  const target = unifyPath(absPath); // 统一化输入的绝对路径
+
   for (const rule of rules) {
+    // 1. 正则匹配
     if (rule.regex.test(absPath)) return rule;
-    // Also allow matching against the original input when the rule is
-    // a directory prefix (ends with /**): if absPath starts with the
-    // expanded prefix we consider it a hit.
+
+    // 2. 目录前缀匹配 (针对 /** 结尾的规则)
     if (rule.pattern.endsWith('/**')) {
-      const prefix = rule.expanded.slice(0, -3);
-      if (absPath === prefix || absPath.startsWith(prefix + path.sep) || absPath.startsWith(prefix + '/')) {
+      // 获取去掉 /** 后的统一化前缀，例如 "c:/users/lenovo/desktop"
+      const prefix = unifyPath(rule.expanded.slice(0, -3));
+      
+      if (
+        target === prefix || 
+        target.startsWith(prefix + '/') || 
+        target.startsWith(prefix + '\\') // 额外兼容 Windows 系统可能出现的边缘情况
+      ) {
         return rule;
       }
     }
@@ -123,9 +129,8 @@ export function matchProtected(absPath, rules) {
   return null;
 }
 
-const PATH_TOKEN_RE = /(?:^|[\s'"`=:;(){}\[\],])(~\/[^\s'"`;|&()<>]+|\/[A-Za-z0-9._\/-]+|\.{1,2}\/[^\s'"`;|&()<>]+)/g;
+const PATH_TOKEN_RE = /(?:^|[\s'"`=:;(){}\[\],])(~\/[^\s'"`;|&()<>]+|[A-Za-z]:[\\\/][^\s'"`;|&()<>]+|\/[^\s'"`;|&()<>]+|\.{1,2}\/[^\s'"`;|&()<>]+)/g;
 
-/** Pull path-looking tokens out of a bash command string. */
 export function extractPathsFromCommand(command) {
   if (typeof command !== 'string' || !command) return [];
   const out = new Set();
@@ -138,7 +143,6 @@ export function extractPathsFromCommand(command) {
   return [...out];
 }
 
-/** Recursively walk a params object and collect string values. */
 function collectStringValues(obj, out = []) {
   if (obj == null) return out;
   if (typeof obj === 'string') { out.push(obj); return out; }
@@ -147,12 +151,6 @@ function collectStringValues(obj, out = []) {
   return out;
 }
 
-/**
- * Turn a tool-call event into a list of path candidates to guard on.
- * @param {string} toolName
- * @param {Record<string, unknown>} params
- * @param {{bashLikeTools?: string[]}} [opts]
- */
 export function extractPathsFromParams(toolName, params, opts = {}) {
   const bashLike = new Set((opts.bashLikeTools || []).map((s) => s.toLowerCase()));
   const tName = String(toolName || '').toLowerCase();
@@ -160,7 +158,6 @@ export function extractPathsFromParams(toolName, params, opts = {}) {
   const candidates = new Set();
 
   if (looksLikeBash) {
-    // Prefer common field names; fall back to concatenating all string params.
     const p = params || {};
     const cmd = [p.command, p.cmd, p.script, p.input, p.code, p.bash, p.shell]
       .filter((v) => typeof v === 'string').join('\n');
@@ -168,25 +165,19 @@ export function extractPathsFromParams(toolName, params, opts = {}) {
     for (const t of extractPathsFromCommand(commandText)) candidates.add(t);
   }
 
-  // Always also collect structured string params that look path-ish.
   for (const v of collectStringValues(params)) {
     const s = v.trim();
     if (!s) continue;
-    if (s.startsWith('~/') || s.startsWith('~\\') || path.isAbsolute(s)) candidates.add(s);
+    // 增加对 Windows 盘符路径 (C:\...) 的识别
+    if (s.startsWith('~/') || s.startsWith('~\\') || path.isAbsolute(s) || /^[A-Za-z]:\\/.test(s)) {
+      candidates.add(s);
+    }
     else if (s.startsWith('./') || s.startsWith('../')) candidates.add(s);
-    // Short plain filenames that match sensitive basenames
     else if (/^(id_rsa|id_ed25519|\.env|credentials|shadow|sudoers)$/i.test(s)) candidates.add(s);
   }
   return [...candidates];
 }
 
-/**
- * Main entry: decide whether this tool call should be blocked based on
- * any protected-path hit.
- *
- * @param {{toolName: string, params: Record<string, unknown>}} event
- * @returns {{block: boolean, matched?: any, candidate?: string, resolved?: string, severity?: string, reason?: string}}
- */
 export function guardBeforeToolCall(event) {
   let loaded;
   try {
@@ -207,7 +198,8 @@ export function guardBeforeToolCall(event) {
 
   for (const candidate of candidates) {
     const resolved = normalizePath(candidate);
-    const hit = matchProtected(resolved, rules) || matchProtected(expandHome(candidate), rules);
+    // 检查解析后的绝对路径，同时也检查原始输入（处理 ~ 情况）
+    const hit = matchProtected(resolved, rules) || matchProtected(normalizePath(expandHome(candidate)), rules);
     if (hit) {
       return {
         block: true,
