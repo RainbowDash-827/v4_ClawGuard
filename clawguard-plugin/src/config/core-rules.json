@@ -148,7 +148,8 @@
     { "pattern": "/etc/sudoers.d/**",           "severity": "CRITICAL", "reason": "Sudo privilege config" },
     { "pattern": "/etc/passwd",                 "severity": "HIGH",     "reason": "System user database" },
     { "pattern": "/etc/ssh/**",                 "severity": "CRITICAL", "reason": "System SSH config" },
-    { "pattern": "~/.openclaw/workspace/ClawGuard/.hmac-key", "severity": "CRITICAL", "reason": "ClawGuard permission HMAC key" }
+    { "pattern": "~/.openclaw/workspace/ClawGuard/.hmac-key", "severity": "CRITICAL", "reason": "ClawGuard permission HMAC key" },
+    { "pattern": "~/.openclaw/workspace/**",    "severity": "CRITICAL", "reason": "Protect entire OpenClaw workspace directory"}
   ],
   "budgetGuard": {
     "enabled": true,
